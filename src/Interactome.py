@@ -1,43 +1,44 @@
 import numpy as np
 import scipy.io as sio 
 import matplotlib.pyplot as plt
-import scipy, os, itertools
+import scipy, os, itertools, argparse
 from collections import defaultdict
 try:
     from src import ProteinGraph as pg
 except:
     import ProteinGraph as pg 
 
+
 class InteractomeDataset(object):
 
-    def __init__(self, filename, fieldname, resultspath, figpath,
-        sparsities=None, thresholds=None, n_perm=50, expression_fn=None, 
-        plasmid_fn=None, gene_name_fn=None):
+    def __init__(self, args):
 
         # Bind relevant information
-        self.filename      = filename
-        self.fieldname     = fieldname
-        self.resultspath   = resultspath
-        self.figpath       = figpath
-        self.sparsities    = sparsities
-        self.thresholds    = thresholds
-        self.n_perm        = n_perm
+        self.filename              = args.filename
+        self.fieldname             = args.fieldname
+        self.resultspath           = args.resultspath
+        self.figpath               = args.figpath
+        self.n_perm                = args.n_perm
+        self.do_nulls              = args.n_perm > 0
+        self.edge_inclusion_method = args.edge_inclusion_method
 
-        self.expression_fn = expression_fn
-        self.plasmid_fn    = plasmid_fn
-        self.gene_name_fn  = gene_name_fn
+        self.expression_fn = args.expression_fn
+        self.plasmid_fn    = args.plasmid_fn
+        self.gene_name_fn  = args.gene_name_fn
 
         # Load unprocessed data
         self.raw_data = self.load_raw_data()
-        self.N_NODES = self.raw_data.shape[0]
+        self.N_NODES  = self.raw_data.shape[0]
+
+        # Load expression levels; if relevant information not passed,
+        # None returned, and no adjustment of interactions performed
         self.names, exp_level_data = self.load_expression_levels()
         if exp_level_data is not None:
             self.raw_data = self.normalize_by_expression_levels(self.raw_data,
                 exp_level_data)
 
-        # Generate graphs and their nulls
-        self.graphs = self.create_graphs()
-
+    ############################################################################
+    # Data loading/pre-processing methods
     def load_raw_data(self):
         """ 
         Load + return raw dataset of interactions.
@@ -152,9 +153,9 @@ class InteractomeDataset(object):
         
         return np.divide(raw_data, exp_products)
 
-
-    ################################################################################
-    def create_graphs(self):
+    ############################################################################
+    # Graph creation methods
+    def create_graphs(self, sparsities, thresholds):
         """ 
         Create and save graphs. 
         """
@@ -177,7 +178,7 @@ class InteractomeDataset(object):
         base_graph = pg.ProteinGraphBase(merged_scores, self.names, self.figpath)
 
         # Iterating through sparsity-formed graphs - by sparsity or threshold
-        rel_var = self.sparsities if self.sparsities is not None else self.thresholds
+        rel_var = sparsities if sparsities is not None else thresholds
         for j, level in enumerate(rel_var):
             print(f"{level:.3f}")
 
@@ -187,7 +188,7 @@ class InteractomeDataset(object):
                 continue
 
             # Generate and save graph
-            if self.sparsities is not None:
+            if sparsities is not None:
                 G = base_graph.form_by_sparsity(level,
                     results_fn)
             else:
@@ -195,46 +196,60 @@ class InteractomeDataset(object):
                     results_fn)
             graphs[level] = G
 
-            # Generate and save null graphs
-            null_pref = os.path.join(self.resultspath, "nulls/",
-                f"{level:.1e}/")
-            dp_pref = null_pref + "deg_pres/degree_preserved_"
-            w_pref = null_pref + "w_perm/w_perm_"
-            e_pref = null_pref + "e_perm/e_perm_"
+            # Generate and save null graphs, if specified
+            if do_nulls:
+                
+                null_pref = os.path.join(self.resultspath, "nulls/",
+                    f"{level:.1e}/")
+                dp_pref = null_pref + "deg_pres/degree_preserved_"
+                w_pref = null_pref + "w_perm/w_perm_"
+                e_pref = null_pref + "e_perm/e_perm_"
 
-            # Weight/edge permutation, deg. pres. rand
-            for i in range(self.n_perm):
-                suff = f"perm_{str(i)}.txt"
-                w_perm = G.weight_permutation(i, w_pref + suff)
-                e_perm = G.edge_permutation(i, e_pref + suff)
-                deg_pres = G.degree_preserving_randomization(i,
-                    save_fn=dp_pref + suff)
+                # Weight/edge permutation, deg. pres. rand
+                for i in range(self.n_perm):
+                    suff = f"perm_{str(i)}.txt"
+                    w_perm = G.weight_permutation(i, w_pref + suff)
+                    e_perm = G.edge_permutation(i, e_pref + suff)
+                    deg_pres = G.degree_preserving_randomization(i,
+                        save_fn=dp_pref + suff)
 
         return graphs
 
-    ################################################################################
     def create_single_graph(self, method, val):
         """ 
         Create single graph, save edgelist for visualization in Gephi 
         """
 
-        # First - combine z-scored interactions via geometric mean to obtain one score per
-        # pair
-        merged_scores = np.zeros_like(self.raw_data)
-        for i in range(self.raw_data.shape[0]):
-            for j in range(self.raw_data.shape[1]):
-                s1 = self.raw_data[i,j]
-                s2 = self.raw_data[j,i]
-                if s1 < 0 or s2 < 0:
-                    ms = 0
-                else:
-                    ms = (s1*s2)**0.5
-                merged_scores[i,j] = ms
-                merged_scores[j,i] = ms
+        # Multi-Z method: combine z-scored interactions via geometric mean 
+        # to obtain one score per pair
+        if self.edge_inclusion_method == 'multi_z':
+
+            merged_scores = np.zeros_like(self.raw_data)
+            for i in range(self.raw_data.shape[0]):
+                for j in range(self.raw_data.shape[1]):
+                    s1 = self.raw_data[i,j]
+                    s2 = self.raw_data[j,i]
+                    if s1 < 0 or s2 < 0:
+                        ms = 0
+                    else:
+                        ms = (s1*s2)**0.5
+                    merged_scores[i,j] = ms
+                    merged_scores[j,i] = ms
+
+
+        # Kovacs max-ent method:
+        elif self.edge_inclusion_method == 'kovacs_maxent':
+
+            # Load hits directly, abuse form_by_threshold w/ threshold
+            # 1; for now, assign all edges the same weight
+            edges = sio.loadmat("../data/maxent_edgelist.mat")['edgelist']
+            merged_scores = np.zeros_like(self.raw_data)
+            merged_scores[edges[:,0].astype(np.int32), edges[:,1].astype(np.int32)] = 1
+
 
         base_graph = pg.ProteinGraphBase(merged_scores, self.names, self.figpath)
 
-        # Generate and save graph
+        # Generate graph
         if method == 'sparsity':
             G = base_graph.form_by_sparsity(val)
         elif method == 'threshold':
@@ -243,11 +258,12 @@ class InteractomeDataset(object):
         # Write edgelist
         G.save_edgelist_csv()
 
-        return
+        return {(method, val): G}
 
     ############################################################################
     # Analysis methods
     def find_canonical_communities(self, comms, p):
+
         # Across all versions of the graph and resolution values,
         # find every node's community, compute Jaccard similarity score
         all_neighbors = defaultdict(list)
@@ -287,6 +303,14 @@ class InteractomeDataset(object):
             mult_appearing = [k for k, v in counts.items() if v / len(comms) > p]
             canonical_neighbors[node] = mult_appearing
 
+        self.write_community_results(community_similarity_scores, canonical_neighbors,
+            all_neighbors)
+        
+        return
+
+    def write_community_results(self, community_similarity_scores, 
+        canonical_neighbors, all_neighbors):
+
         # Save nodes + neighbors
         cc_dir = os.path.join(self.resultspath, f"community_members/")
         if not os.path.exists(cc_dir):
@@ -306,15 +330,17 @@ class InteractomeDataset(object):
                 f.write("\n\n")
                 f.write("Canonical neighbors:\n")
                 f.write("\n".join([f"{str(j)} {self.names[j][0]} {self.names[j][1]}" for j in canonical_neighbors[i]]))
+
         return
 
-    def compute_canonical_community_assignments(self, p=0.25):
+    def compute_canonical_community_assignments(self, graphs, resolutions, 
+        p=0.25):
 
-        com_resolutions = [{'resolution': i} for i in np.linspace(0.5, 1.5, 10)]
+        com_resolutions = [{'resolution': i} for i in resolutions]
         com_assignments = {}
 
         # Loop through all graphs
-        for k, g in self.graphs.items():
+        for k, g in graphs.items():
 
             # Loop through all resolutions for community detection
             ca = g.compute_community_assignments(com_resolutions)
@@ -329,26 +355,31 @@ class InteractomeDataset(object):
 
         return
 
+################################################################################
 if __name__ == "__main__":
 
-    filename = "../data/raw_norm.mat"
-    fieldname = "TwohrRowColumnNormalized"
-    resultspath = "../"
-    figpath = "../figures/"
-    expression_fn = None # "../data/expression-Table 1.csv"
-    plasmid_fn = None # "../data/plasmids-Table 1.csv"
-    gene_name_fn = "../data/Gene_Names.csv"
+    # Parse args from cmdline; use these defaults otherwise
+    parser = argparse.ArgumentParser('')
+    parser.add_argument('--filename', type=str, default="../data/raw_norm.mat")
+    parser.add_argument('--fieldname', type=str, default="TwohrRowColumnNormalized")
+    parser.add_argument('--resultspath', type=str, default="../")
+    parser.add_argument('--figpath', type=str, default="../figures/")
+    parser.add_argument('--expression_fn', type=str, default=None) # "../data/expression-Table 1.csv"
+    parser.add_argument('--plasmid_fn', type=str, default=None) # "../data/plasmids-Table 1.csv"
+    parser.add_argument('--gene_name_fn', type=str, default="../data/Gene_Names.csv")
+    parser.add_argument('--n_perm', type=int, default=0)
+    parser.add_argument('--edge_inclusion_method', type=str, default='kovacs_maxent')
 
-    n_perm = 50
-    sparsities = None # Ex: np.linspace(0.002, 0.05, 20)
-    thresholds = np.linspace(2, 20, 10)
+    args = parser.parse_args()
 
-    interactome = InteractomeDataset(filename, fieldname, resultspath,
-        figpath, sparsities, thresholds, n_perm, expression_fn, 
-        plasmid_fn, gene_name_fn)
+    ############################################################################
+    # Make interactome object
+    interactome = InteractomeDataset(args)
 
-    # Generate graph w/ z-threshold of 20 for edges + save edges
-    interactome.create_single_graph('threshold', 20)
+    # Generate graph w/ threshold for edges + save for visualization
+    threshold = 0.5 if args.edge_inclusion_method == 'kovacs_maxent' else 20
+    graph = interactome.create_single_graph('threshold', threshold)
 
     # Run community detection analysis
-    interactome.compute_canonical_community_assignments()
+    resolutions = np.linspace(0.1, 10, 50)
+    interactome.compute_canonical_community_assignments(graph, resolutions)

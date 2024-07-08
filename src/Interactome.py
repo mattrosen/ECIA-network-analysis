@@ -292,7 +292,8 @@ class InteractomeDataset(object):
             G = base_graph.form_by_threshold(val)
         
         # Write edgelist
-        G.save_edgelist_csv()
+        if self.save_edgelists:
+            G.save_edgelist_csv()
 
         return {(method, val): G}
 
@@ -436,7 +437,7 @@ class InteractomeDataset(object):
 
     def write_community_results(self, canonical_neighbors, all_neighbors):
 
-        workbook = xlsxwriter.Workbook('TableS4_neighbors.xlsx')
+        workbook = xlsxwriter.Workbook(os.path.join(self.resultspath, 'TableS4_neighbors.xlsx'))
         canonical_sheet = workbook.add_worksheet('Canonical neighbors')
         all_sheet = workbook.add_worksheet('All neighbors')
 

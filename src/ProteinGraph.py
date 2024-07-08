@@ -18,10 +18,11 @@ mpl.rcParams['ps.fonttype'] = 42
 
 class ProteinGraphBase:
 
-    def __init__(self, adj, proteinnames, figpath):
+    def __init__(self, adj, proteinnames, figpath, remove_isolates):
         self.adj = adj
         self.proteinnames = proteinnames
         self.figpath = figpath
+        self.remove_isolates = remove_isolates
         return
 
     ################################################################################
@@ -47,7 +48,7 @@ class ProteinGraphBase:
         if save_fn is not None:
             utilities.save_edgelist(graph, save_fn)
 
-        return ProteinGraph(graph, self.proteinnames, f"sparsity={pct:.3f}", self.figpath)
+        return ProteinGraph(graph, self.proteinnames, f"sparsity={pct:.3f}", self.figpath, self.remove_isolates)
 
     ################################################################################
     def form_by_threshold(self, wmin, save_fn=None):
@@ -71,15 +72,22 @@ class ProteinGraphBase:
         if save_fn is not None:
             utilities.save_edgelist(graph, save_fn)
 
-        return ProteinGraph(graph, self.proteinnames, f"wmin={wmin:.3f}", self.figpath)
+        return ProteinGraph(graph, self.proteinnames, f"wmin={wmin:.3f}", self.figpath, self.remove_isolates)
 
 
 class ProteinGraph(object):
 
-    def __init__(self, adj, proteinnames, name, figpath):
+    def __init__(self, adj, proteinnames, name, figpath, remove_isolates=True):
 
         self.adj = adj
         self.G = nx.from_numpy_array(adj)
+        self.remove_isolates = remove_isolates
+
+        # Remove disconnected nodes
+        if self.remove_isolates:
+            self.G.remove_nodes_from(list(nx.isolates(self.G)))
+        print(self.G)
+        #print(nx.number_of_selfloops(self.G))
         self.proteinnames = proteinnames
         self.name = name
         self.figpath = figpath
@@ -120,7 +128,30 @@ class ProteinGraph(object):
             self.name + f"_randremoval_pct={pct:.3f}_{i}", self.figpath)
 
     ################################################################################
-    def weight_permutation(self, i, save_fn=None):
+    def permute_weights_by_node(self, i, save_fn=None):
+        """ Permute weights of graph specified by adj.
+            
+            Args:    i        (int)
+                     save_fn  (None or str)
+            
+            Returns: graph (ProteinGraph obj)
+        """
+
+        # Find links for each node
+        permuted = copy.deepcopy(self.adj)
+        for j in range(self.adj.shape[0]):
+            links = np.where(self.adj[j] > 0)[0]
+            permuted[j, links] = np.random.permutation(permuted[j, links])
+
+        # Save if desired
+        if save_fn is not None:
+            utilities.save_edgelist(permuted, save_fn)
+
+        return ProteinGraph(permuted, self.proteinnames, 
+            self.name + f"_wperm_{i}", self.figpath)
+
+    ################################################################################
+    def permute_weights(self, i, save_fn=None):
         """ Permute weights of graph specified by adj.
             
             Args:    i        (int)
@@ -145,7 +176,7 @@ class ProteinGraph(object):
             self.name + f"_wperm_{i}", self.figpath)
 
     ################################################################################
-    def edge_permutation(self, i, save_fn=None):
+    def permute_edges(self, i, save_fn=None):
         """ Permute edges of graph specified by adj.
             
             Args:    i        (int)
@@ -158,7 +189,7 @@ class ProteinGraph(object):
         links = np.where(self.adj > 0)
 
         # Randomly link network
-        new_links = np.random.choice(range(len(self.adj.flatten())), 
+        new_links = np.random.choice(np.arange(len(self.adj.flatten())), 
             len(links[0]), replace=False)
         weights = self.adj[links]
         permuted = np.zeros(len(self.adj.flatten()))
@@ -248,65 +279,40 @@ class ProteinGraph(object):
         return
 
     ############################################################################
-    def compute_betweenness_centrality(self):
-        """ Compute betweenness centrality for all nodes in the graph.
-                  
-            Returns: centralities (dict of dicts)
-            
-        """
-        return betweenness_centrality(self.G)
-
-    def plot_betweenness_centrality_distribution(self):
-
-        return
-
-    ############################################################################
-    def compute_community_assignments(self, louvain_args=[{'resolution': 0.2}]):
-        """ Compute community assignments via Louvain algorithm.
+    def compute_community_assignments(self, louvain_args=[{'resolution': 0.2}], 
+        return_modularity=False):
+        """ Compute community assignments via Louvain algorithm w/ resolution
+            parameter. 
 
             Args:     louvain_args (list of dict)
                   
             Returns:  comm_assignments (dict of dicts)
             
         """
-    
+        
         comm_assignments = {}
 
         # For each cobination of arguments to community detection algorithm,
         # identify community IDs for all nodes and store        
         for i, l_args in enumerate(louvain_args):
             comm_assignments[(self.name,i)] = community.best_partition(self.G, **l_args)
+
+        # If specified, compute modularity of each partition + return
+        if return_modularity:
+            modularities = {k: community.modularity(v, self.G) for k, v in comm_assignments.items()}
+            return modularities
+
         
         return comm_assignments
 
     ############################################################################
-    def compute_degree_distribution(self):
-        """ Compute node degrees.
-            
-            Returns: degrees (dict)
+    def compute_induced_graph(self, comm_assignments):
+        """ Compute induced graph, given partition described in comm_assignments.
+
+            Args:     comm_assignments (dict)
+                  
+            Returns:  induced_graph (networkx graph)
             
         """
         
-        # Compute + return node degrees
-        return dict(self.G.degree())
-
-    def plot_degree_distribution(self, deg_dist):
-        """ Plot degree distribution.
-            
-            Returns: None
-        """
-
-        # Extract + plot degree distribution
-        degrees = np.array(deg_dist.values())
-        fig, ax = plt.subplots(1, figsize=(3,3))
-        sns.histplot(data=degrees, ax=ax, bins=degrees.max() - degrees.min(),
-            discrete=True, linewidth=0, stat='count')
-        ax.set(xlabel='Degree', ylabel='Count')
-
-        plt.tight_layout()
-        fig.savefig(os.path.join(self.figpath, 
-            f'{self.sparsity}_degree_distribution.pdf'))
-
-        return 
-
-    ############################################################################
+        return community.induced_graph(comm_assignments, self.G)
